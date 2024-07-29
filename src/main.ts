@@ -4,8 +4,6 @@ import OpenAI from "openai";
 import { Octokit } from "@octokit/rest";
 import parseDiff, { Chunk, File } from "parse-diff";
 import minimatch from "minimatch";
-import { parse } from "path";
-import { APIPromise } from "openai/core";
 
 const GITHUB_TOKEN: string = core.getInput("GITHUB_TOKEN");
 const OPENAI_API_KEY: string = core.getInput("OPENAI_API_KEY");
@@ -65,18 +63,11 @@ async function analyzeCode(
 ): Promise<Array<{ body: string; path: string; line: number }>> {
   const comments: Array<{ body: string; path: string; line: number }> = [];
 
-  if (parsedDiff.length > 10) {
-    comments.push({
-      body: "This pull request has too many files to review (more than 10). Please split it into smaller pull requests. This is for cost purposes.",
-      path: "",
-      line: 0,
-    });
-    return comments;
-  }
   for (const file of parsedDiff) {
     if (file.to === "/dev/null") continue; // Ignore deleted files
     for (const chunk of file.chunks) {
       const prompt = createPrompt(file, chunk, prDetails);
+      console.log(prompt);
       const aiResponse = await getAIResponse(prompt);
       if (aiResponse) {
         const newComments = createComment(file, chunk, aiResponse);
@@ -97,6 +88,7 @@ function createPrompt(file: File, chunk: Chunk, prDetails: PRDetails): string {
 - Write the comment in GitHub Markdown format and use Traditional Chinese.
 - Use the given description only for the overall context and only comment the code.
 - IMPORTANT: NEVER suggest adding comments to the code.
+${COMMENT_LANGUAGE ? `- Write the comments in ${COMMENT_LANGUAGE}.\n` : ''}
 
 Review the following code diff in the file "${
     file.to
@@ -134,12 +126,13 @@ async function getAIResponse(prompt: string): Promise<Array<{
     presence_penalty: 0,
   };
 
-  let response: OpenAI.Chat.Completions.ChatCompletion | null = null;
   try {
-    response = await openai.chat.completions.create({
+    const response = await openai.chat.completions.create({
       ...queryConfig,
       // return JSON if the model supports it:
-      response_format: { type: "json_object" as const },
+      ...(OPENAI_API_MODEL === "gpt-4-1106-preview"
+        ? { response_format: { type: "json_object" } }
+        : {}),
       messages: [
         {
           role: "system",
@@ -148,19 +141,10 @@ async function getAIResponse(prompt: string): Promise<Array<{
       ],
     });
 
-    const finish_response = response.choices[0].finish_reason;
-    if (finish_response === "length") {
-      console.log("The maximum context length has been exceeded. Please reduce the length of the code snippets.");
-      return null;
-    }
     const res = response.choices[0].message?.content?.trim() || "{}";
-    if (res.startsWith("```json")) {
-      return JSON.parse(res.slice(7, -3)).reviews
-    } else {
-      return JSON.parse(res).reviews;
-    }
+    return JSON.parse(res).reviews;
   } catch (error) {
-    console.error("Error:", error, response?.choices[0].message?.content);
+    console.error("Error:", error);
     return null;
   }
 }
